@@ -180,3 +180,19 @@ USE_VERTEX_AI=true # 設定為 true 時使用 GCP Vertex AI 引擎，需要搭�
 * 📗 [專案統一詞彙表 (GLOSSARY.md)](file:///c:/Users/etrny/.gemini/antigravity/scratch/notion-dkms/GLOSSARY.md)
 * 📓 [專案待辦與開發狀態記錄 (PENDING.md)](file:///c:/Users/etrny/.gemini/antigravity/scratch/notion-dkms/PENDING.md)
 
+---
+
+## ⚡ V4 第二大腦強化工具組（2026-11 升級：先補盲區 → 輕量索引 → 帶問題檢索）
+
+針對「將 Notion 作為個人第二大腦、遇到問題精準檢索」的實務需求，V4 新增一套**零後付帳單風險（\$0 免費通道＋本機 GPU/OCR）**的模組化工具組：
+
+| 工具腳本 | 核心功能 | 成本與防護 |
+| :--- | :--- | :--- |
+| **`v4_config.py`** | 18 類固定白名單標籤、Facebook 登入牆偵測器、Notion 安全切片寫入（≤60 Blocks）與 `FreeTierLLMClient` | 嚴格禁用 Vertex AI 後付，僅走 Google AI Studio ↔ NVIDIA NIM 免費層 |
+| **`batch_processor_v4.py`** | 增量補齊 `AI 摘要` 與 1～2 個白名單 `AI 標籤`（停填可信度/可執行性），0 Token 自動標記 `抓取失敗` / `待補正文` | \$0 免費通道 |
+| **`enrich_youtube.py`** | 呼叫本機 `yt-transcript-cascade`（L1 字幕 → L2 RTX 4060 `faster-whisper`）補齊底部折疊區逐字稿＋上方精華 Callout | 轉錄 0 Token / 摘要 \$0 免費層 |
+| **`enrich_ocr.py`** | 使用 `rapidocr-onnxruntime` 本機離線辨識卡片內截圖/資訊圖文字，寫入底部折疊區（支援斷點續跑） | 100% 本機離線 0 Token |
+| **`export_for_zerorag.py`** | 過濾空白頁與登入牆，一鍵匯出乾淨 Markdown（含逐字稿與 OCR）至 `exports/` 供 ZeroRAG 語意檢索 | 0 Token（`exports/` 已由 `.gitignore` 隔離） |
+| **`ask_teacher.py`** | **「AI 當老師」指定命題彙整**：依您指定的標籤或主題（如 `--topic "AI實戰案例"`）輸出結構化案例對照表＋原始 Notion 連結 | \$0 免費通道，強制附原連結不腦補 |
+| **`run_v4_full_pipeline.py`** | 依序執行「810 筆補摘要 → YouTube 逐字稿 → 全庫離線 OCR」之無人值守批次管線 | 循序執行防 GPU/API 碰撞 |
+

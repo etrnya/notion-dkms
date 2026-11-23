@@ -22,6 +22,11 @@ list_models.py
 properties.txt
 properties.json
 
+# V4 local exports, checkpoints and logs (contain personal notes — never push)
+exports/
+checkpoints/
+*.log
+
 # IDE config files
 .vscode/
 .idea/
