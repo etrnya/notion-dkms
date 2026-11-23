@@ -56,114 +56,101 @@ def run_youtube_enrichment(limit: int = 0, with_summary: bool = True, delay_sec:
     orch = CascadeOrchestrator()
 
     stats = {"scanned": 0, "enriched": 0, "skipped": 0, "failed": 0}
-    cursor = None
+    pages = notion.query_all_pages(
+        filter_obj={
+            "or": [
+                {"property": "URL", "url": {"contains": "youtube.com/watch"}},
+                {"property": "URL", "url": {"contains": "youtu.be/"}},
+                {"property": "URL", "url": {"contains": "youtube.com/shorts/"}},
+            ]
+        },
+        sorts=[{"timestamp": "created_time", "direction": "descending"}],
+    )
+    print(f"[INFO] Prefetched {len(pages)} YouTube pages.", flush=True)
 
-    while True:
-        body: dict[str, Any] = {
-            "page_size": 50,
-            "filter": {
-                "or": [
-                    {"property": "URL", "url": {"contains": "youtube.com/watch"}},
-                    {"property": "URL", "url": {"contains": "youtu.be/"}},
-                    {"property": "URL", "url": {"contains": "youtube.com/shorts/"}},
-                ]
-            },
-            "sorts": [{"timestamp": "created_time", "direction": "descending"}],
-        }
-        if cursor:
-            body["start_cursor"] = cursor
-        res = notion.query_database(body)
-        pages = res.get("results", [])
-        if not pages:
-            break
+    for page in pages:
+        if limit > 0 and stats["enriched"] >= limit:
+            return stats
+        stats["scanned"] += 1
+        pid = page["id"]
+        pr = page["properties"]
+        title = "".join(t.get("plain_text", "") for t in pr.get("Name", {}).get("title", [])).strip() or "無標題"
+        url = pr.get("URL", {}).get("url") or ""
 
-        for page in pages:
-            if limit > 0 and stats["enriched"] >= limit:
-                return stats
-            stats["scanned"] += 1
-            pid = page["id"]
-            pr = page["properties"]
-            title = "".join(t.get("plain_text", "") for t in pr.get("Name", {}).get("title", [])).strip() or "無標題"
-            url = pr.get("URL", {}).get("url") or ""
+        try:
+            existing = notion.get_blocks(pid, page_size=50)
+            has_transcript = any(
+                b.get("type") == "toggle"
+                and "".join(x.get("plain_text", "") for x in b["toggle"].get("rich_text", [])).startswith("AI 逐字稿")
+                for b in existing
+            )
+            if has_transcript:
+                stats["skipped"] += 1
+                continue
 
-            try:
-                existing = notion.get_blocks(pid, page_size=50)
-                has_transcript = any(
-                    b.get("type") == "toggle"
-                    and "".join(x.get("plain_text", "") for x in b["toggle"].get("rich_text", [])).startswith("AI 逐字稿")
-                    for b in existing
-                )
-                if has_transcript:
-                    stats["skipped"] += 1
-                    continue
-
-                t0 = time.time()
-                req = GetTranscriptInput(
-                    url=url,
-                    languages=["zh-Hant", "zh-Hans", "zh", "en"],
-                    execution_mode=ExecutionMode.AUTO,
-                    enable_colab_fallback=False,
-                    allow_cloud_processing=False,
-                    output_format=OutputFormat.MARKDOWN,
-                    max_output_chars=120000,
-                    timeout_sec=360,
-                )
-                out = orch.get_transcript(req)
-                if not out.get("ok"):
-                    stats["failed"] += 1
-                    print(f"[YT-FAIL] {title[:45]} -> {out.get('error', {}).get('code')}")
-                    continue
-
-                meta = out.get("result", {})
-                content = out.get("rendered_text", "")
-                tier = meta.get("tier_used", "")
-                src = meta.get("source_type", "")
-                eng = meta.get("engine_used") or "yt-dlp"
-                dev = meta.get("device_used") or "cpu"
-                lang = meta.get("source_language", "")
-                header = f"AI 逐字稿（{tier} / {src} | {eng}@{dev} | 語言: {lang} | 字數: {len(content)}）"
-
-                if with_summary and llm and len(content) > 200:
-                    try:
-                        summary, tags = summarize_transcript(llm, title, content)
-                        if summary:
-                            notion.append_blocks(
-                                pid,
-                                [
-                                    {
-                                        "object": "block",
-                                        "type": "callout",
-                                        "callout": {
-                                            "icon": {"type": "emoji", "emoji": "💡"},
-                                            "color": "blue_background",
-                                            "rich_text": [{"type": "text", "text": {"content": summary[:1900]}}],
-                                        },
-                                    }
-                                ],
-                            )
-                            notion.patch_page_properties(
-                                pid,
-                                {
-                                    "AI 摘要": {"rich_text": [{"type": "text", "text": {"content": summary[:1900]}}]},
-                                    "AI 標籤": {"multi_select": [{"name": t} for t in tags]},
-                                    "AI 已處理": {"checkbox": True},
-                                },
-                            )
-                            time.sleep(delay_sec)
-                    except Exception as se:
-                        print(f"  [WARN] Summary skipped for {title[:30]}: {se}")
-
-                notion.append_toggle_text(pid, "AI 逐字稿", header, content)
-                elapsed = round(time.time() - t0, 1)
-                stats["enriched"] += 1
-                print(f"[YT-OK #{stats['enriched']}] ({tier}, {len(content)} chars, {elapsed}s) {title[:45]}")
-            except Exception as e:
+            t0 = time.time()
+            req = GetTranscriptInput(
+                url=url,
+                languages=["zh-Hant", "zh-Hans", "zh", "en"],
+                execution_mode=ExecutionMode.AUTO,
+                enable_colab_fallback=False,
+                allow_cloud_processing=False,
+                output_format=OutputFormat.MARKDOWN,
+                max_output_chars=120000,
+                timeout_sec=360,
+            )
+            out = orch.get_transcript(req)
+            if not out.get("ok"):
                 stats["failed"] += 1
-                print(f"[YT-ERR] {title[:45]} -> {e}")
+                print(f"[YT-FAIL] {title[:45]} -> {out.get('error', {}).get('code')}", flush=True)
+                continue
 
-        if not res.get("has_more"):
-            break
-        cursor = res.get("next_cursor")
+            meta = out.get("result", {})
+            content = out.get("rendered_text", "")
+            tier = meta.get("tier_used", "")
+            src = meta.get("source_type", "")
+            eng = meta.get("engine_used") or "yt-dlp"
+            dev = meta.get("device_used") or "cpu"
+            lang = meta.get("source_language", "")
+            header = f"AI 逐字稿（{tier} / {src} | {eng}@{dev} | 語言: {lang} | 字數: {len(content)}）"
+
+            if with_summary and llm and len(content) > 200:
+                try:
+                    summary, tags = summarize_transcript(llm, title, content)
+                    if summary:
+                        notion.append_blocks(
+                            pid,
+                            [
+                                {
+                                    "object": "block",
+                                    "type": "callout",
+                                    "callout": {
+                                        "icon": {"type": "emoji", "emoji": "💡"},
+                                        "color": "blue_background",
+                                        "rich_text": [{"type": "text", "text": {"content": summary[:1900]}}],
+                                    },
+                                }
+                            ],
+                        )
+                        notion.patch_page_properties(
+                            pid,
+                            {
+                                "AI 摘要": {"rich_text": [{"type": "text", "text": {"content": summary[:1900]}}]},
+                                "AI 標籤": {"multi_select": [{"name": t} for t in tags]},
+                                "AI 已處理": {"checkbox": True},
+                            },
+                        )
+                        time.sleep(delay_sec)
+                except Exception as se:
+                    print(f"  [WARN] Summary skipped for {title[:30]}: {se}", flush=True)
+
+            notion.append_toggle_text(pid, "AI 逐字稿", header, content)
+            elapsed = round(time.time() - t0, 1)
+            stats["enriched"] += 1
+            print(f"[YT-OK #{stats['enriched']}] ({tier}, {len(content)} chars, {elapsed}s) {title[:45]}", flush=True)
+        except Exception as e:
+            stats["failed"] += 1
+            print(f"[YT-ERR] {title[:45]} -> {e}", flush=True)
 
     return stats
 

@@ -181,6 +181,25 @@ class NotionClientLight:
     def query_database(self, body: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", f"https://api.notion.com/v1/databases/{self.database_id}/query", body)
 
+    def query_all_pages(self, filter_obj: dict[str, Any] | None = None, sorts: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        """Prefetch all matching pages rapidly so long-running loops never hit Notion cursor expiration."""
+        pages: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            body: dict[str, Any] = {"page_size": 100}
+            if filter_obj:
+                body["filter"] = filter_obj
+            if sorts:
+                body["sorts"] = sorts
+            if cursor:
+                body["start_cursor"] = cursor
+            res = self.query_database(body)
+            pages.extend(res.get("results", []))
+            if not res.get("has_more"):
+                break
+            cursor = res.get("next_cursor")
+        return pages
+
     def get_blocks(self, block_id: str, page_size: int = 80) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         cursor = None
@@ -287,9 +306,17 @@ class FreeTierLLMClient:
 
     def _call_ai_studio(self, prompt: str, model: str) -> str:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        gen_cfg: dict[str, Any] = {
+            "temperature": 0.2,
+            "maxOutputTokens": 2048,
+        }
+        if "json" in prompt.lower():
+            gen_cfg["responseMimeType"] = "application/json"
+        if "2.5-flash" in model:
+            gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
         body = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
+            "generationConfig": gen_cfg,
         }
         req = urllib.request.Request(
             url,

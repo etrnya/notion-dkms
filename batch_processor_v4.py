@@ -51,72 +51,59 @@ def run_batch(limit: int = 0, delay_sec: float = 2.0, dry_run: bool = False) -> 
     llm = FreeTierLLMClient(env)
 
     stats = {"processed": 0, "llm_ok": 0, "login_wall": 0, "empty_body": 0, "errors": 0}
-    cursor = None
+    pages = notion.query_all_pages(
+        filter_obj={"property": "AI 已處理", "checkbox": {"equals": False}},
+        sorts=[{"timestamp": "created_time", "direction": "descending"}],
+    )
+    print(f"[INFO] Prefetched {len(pages)} unprocessed pages.", flush=True)
 
-    while True:
-        body: dict[str, Any] = {
-            "page_size": 50,
-            "filter": {"property": "AI 已處理", "checkbox": {"equals": False}},
-            "sorts": [{"timestamp": "created_time", "direction": "descending"}],
-        }
-        if cursor:
-            body["start_cursor"] = cursor
-        res = notion.query_database(body)
-        pages = res.get("results", [])
-        if not pages:
-            break
+    for page in pages:
+        if limit > 0 and stats["processed"] >= limit:
+            return stats
+        pid = page["id"]
+        title = get_page_title(page)
+        url = page.get("properties", {}).get("URL", {}).get("url") or ""
 
-        for page in pages:
-            if limit > 0 and stats["processed"] >= limit:
-                return stats
-            pid = page["id"]
-            title = get_page_title(page)
-            url = page.get("properties", {}).get("URL", {}).get("url") or ""
+        try:
+            text = notion.extract_page_text(pid, include_toggles=True)
+            # 1. Zero-token deterministic pre-filters
+            if is_login_wall(title, text):
+                summary = "【抓取失敗】原網頁為登入牆或無效頁面，建議忽略或重新擷取。"
+                tags = ["抓取失敗"]
+                provider = "rule:login_wall"
+                stats["login_wall"] += 1
+            elif len(text.strip()) < 40:
+                summary = "【待補正文】目前僅有標題/網址，尚無足夠正文可供提煉。"
+                tags = ["待補正文"]
+                provider = "rule:empty_body"
+                stats["empty_body"] += 1
+            else:
+                prompt = build_prompt(title, url, text)
+                raw, provider = llm.generate(prompt)
+                parsed = parse_json_silentfix(raw)
+                summary = str(parsed.get("summary", "")).strip()[:1900]
+                tags = filter_whitelist_tags(parsed.get("tags", []), max_tags=2)
+                if not summary:
+                    raise ValueError("Empty summary from LLM")
+                stats["llm_ok"] += 1
+                time.sleep(delay_sec)
 
-            try:
-                text = notion.extract_page_text(pid, include_toggles=True)
-                # 1. Zero-token deterministic pre-filters
-                if is_login_wall(title, text):
-                    summary = "【抓取失敗】原網頁為登入牆或無效頁面，建議忽略或重新擷取。"
-                    tags = ["抓取失敗"]
-                    provider = "rule:login_wall"
-                    stats["login_wall"] += 1
-                elif len(text.strip()) < 40:
-                    summary = "【待補正文】目前僅有標題/網址，尚無足夠正文可供提煉。"
-                    tags = ["待補正文"]
-                    provider = "rule:empty_body"
-                    stats["empty_body"] += 1
-                else:
-                    prompt = build_prompt(title, url, text)
-                    raw, provider = llm.generate(prompt)
-                    parsed = parse_json_silentfix(raw)
-                    summary = str(parsed.get("summary", "")).strip()[:1900]
-                    tags = filter_whitelist_tags(parsed.get("tags", []), max_tags=2)
-                    if not summary:
-                        raise ValueError("Empty summary from LLM")
-                    stats["llm_ok"] += 1
-                    time.sleep(delay_sec)
+            if not dry_run:
+                notion.patch_page_properties(
+                    pid,
+                    {
+                        "AI 摘要": {"rich_text": [{"type": "text", "text": {"content": summary}}]},
+                        "AI 標籤": {"multi_select": [{"name": t} for t in tags]},
+                        "AI 已處理": {"checkbox": True},
+                    },
+                )
 
-                if not dry_run:
-                    notion.patch_page_properties(
-                        pid,
-                        {
-                            "AI 摘要": {"rich_text": [{"type": "text", "text": {"content": summary}}]},
-                            "AI 標籤": {"multi_select": [{"name": t} for t in tags]},
-                            "AI 已處理": {"checkbox": True},
-                        },
-                    )
-
-                stats["processed"] += 1
-                print(f"[{stats['processed']}] ({provider}) {tags} | {title[:42]}")
-            except Exception as e:
-                stats["errors"] += 1
-                print(f"[ERR] {title[:40]} -> {e}")
-                time.sleep(2.0)
-
-        if not res.get("has_more"):
-            break
-        cursor = res.get("next_cursor")
+            stats["processed"] += 1
+            print(f"[{stats['processed']}] ({provider}) {tags} | {title[:42]}", flush=True)
+        except Exception as e:
+            stats["errors"] += 1
+            print(f"[ERR] {title[:40]} -> {e}", flush=True)
+            time.sleep(2.0)
 
     return stats
 
