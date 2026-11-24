@@ -116,6 +116,11 @@ def ask_teacher(topic: str, tag: str | None = None, max_notes: int = 12) -> Path
     )
     out_path.write_text(header + crystal_md, encoding="utf-8")
     print(f"[TEACHER-OK] notes={len(notes)}, provider={provider}, saved={out_path}")
+    try:
+        from build_teacher_hub import build_teacher_hub
+        build_teacher_hub(EXPORTS_DIR)
+    except Exception as e:
+        print(f"[WARN] Failed to rebuild HTML Hub: {e}")
     return out_path
 
 

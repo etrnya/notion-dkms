@@ -308,7 +308,7 @@ class FreeTierLLMClient:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         gen_cfg: dict[str, Any] = {
             "temperature": 0.2,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 4096,
         }
         if "json" in prompt.lower():
             gen_cfg["responseMimeType"] = "application/json"
